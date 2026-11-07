@@ -11,6 +11,8 @@ import android.graphics.PixelFormat
 import android.graphics.PointF
 import android.graphics.RectF
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
+import android.os.SystemClock
 import android.util.DisplayMetrics
 import android.view.Gravity
 import android.view.MotionEvent
@@ -54,7 +56,13 @@ class SyncService : AccessibilityService() {
 
     override fun onServiceConnected() {
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        Logger.init(applicationContext)
+        val dm = DisplayMetrics()
+        @Suppress("DEPRECATION")
+        wm.defaultDisplay.getRealMetrics(dm)
+        log("=== Service connected | ${Build.MODEL} | Android ${Build.VERSION.SDK_INT} | screen ${dm.widthPixels}x${dm.heightPixels} ===")
         loadRects()
+        log("loaded rects=${rects.map { rs(it) }} panes=${paneCount()}")
         syncBtn = makeButton("SYNC OFF", 20, 300, { toggleSync() }).also { syncParams = it.second }.first
         zoneBtn = makeButton(zoneLabel(), 20, 420, { toggleCalibrate() }).also { zoneParams = it.second }.first
     }
@@ -84,6 +92,9 @@ class SyncService : AccessibilityService() {
             if (v.size == 4) rects.add(RectF(v[0], v[1], v[2], v[3]))
         }
     }
+
+    private fun log(m: String) = Logger.d("SVC", m)
+    private fun rs(r: RectF) = "[${r.left.toInt()},${r.top.toInt()} - ${r.right.toInt()},${r.bottom.toInt()}]"
 
     private fun paneCount() = getSharedPreferences("cfg", MODE_PRIVATE).getInt("panes", 2).coerceIn(1, 8)
     private fun zoneLabel() = if (rects.isEmpty()) "VÙNG: chưa cài" else "VÙNG ✓ (${rects.size})"
@@ -139,6 +150,7 @@ class SyncService : AccessibilityService() {
     private fun toggleSync() {
         if (calibrating) stopCalibrate(save = false)
         syncOn = !syncOn
+        log("toggleSync -> ${if (syncOn) "ON" else "OFF"} (rects=${rects.size})")
         if (syncOn) {
             addCapture()
             capture?.rects?.apply { clear(); addAll(rects) }
@@ -158,6 +170,7 @@ class SyncService : AccessibilityService() {
         syncBtn?.text = "SYNC OFF"; setColor(syncBtn, "#CC555555")
         removeCapture()
         calibrating = true
+        log("calibrate START, need ${paneCount()} rects")
         addCapture()
         capture?.rects?.clear()
         bringButtonsToTop()
@@ -166,6 +179,7 @@ class SyncService : AccessibilityService() {
     }
 
     private fun stopCalibrate(save: Boolean) {
+        log("calibrate STOP save=$save rects=${capture?.rects?.map { rs(it) }}")
         if (save) {
             rects = ArrayList(capture?.rects ?: emptyList())
             saveRects()
@@ -212,6 +226,7 @@ class SyncService : AccessibilityService() {
                 val r = RectF(min(sx, e.rawX), min(sy, e.rawY), max(sx, e.rawX), max(sy, e.rawY))
                 v.cur = null
                 if (r.width() > 100 && r.height() > 100) v.rects.add(r)
+                log("calibrate rect ${rs(r)} accepted=${r.width() > 100 && r.height() > 100}")
                 v.invalidate()
                 val n = paneCount()
                 if (v.rects.size >= n) stopCalibrate(save = true)
@@ -222,15 +237,26 @@ class SyncService : AccessibilityService() {
 
     private fun handleSync(e: MotionEvent) {
         when (e.action) {
-            MotionEvent.ACTION_DOWN -> { points.clear(); downTime = e.eventTime; points.add(PointF(e.rawX, e.rawY)) }
+            MotionEvent.ACTION_DOWN -> {
+                points.clear(); downTime = e.eventTime; points.add(PointF(e.rawX, e.rawY))
+                val loc = IntArray(2)
+                capture?.getLocationOnScreen(loc)
+                log("DOWN raw=(${e.rawX.toInt()},${e.rawY.toInt()}) local=(${e.x.toInt()},${e.y.toInt()}) overlayOrigin=(${loc[0]},${loc[1]})")
+            }
             MotionEvent.ACTION_MOVE -> points.add(PointF(e.rawX, e.rawY))
-            MotionEvent.ACTION_UP -> { points.add(PointF(e.rawX, e.rawY)); replay(e.eventTime - downTime) }
+            MotionEvent.ACTION_UP -> {
+                points.add(PointF(e.rawX, e.rawY))
+                val el = e.eventTime - downTime
+                log("UP raw=(${e.rawX.toInt()},${e.rawY.toInt()}) points=${points.size} held=${el}ms")
+                replay(el)
+            }
         }
     }
 
     private fun setPassThrough(on: Boolean) {
         val v = capture ?: return
         val lp = capParams ?: return
+        log("passThrough=$on")
         lp.flags = if (on) lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
                    else lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
         try { wm.updateViewLayout(v, lp) } catch (_: Exception) {}
@@ -255,30 +281,35 @@ class SyncService : AccessibilityService() {
         if (points.isEmpty()) return
         val list = panes()
         val first = points.first()
-        val src = list.firstOrNull { it.contains(first.x, first.y) }
+        val srcIdx = list.indexOfFirst { it.contains(first.x, first.y) }
+        val src = list.getOrNull(srcIdx)
 
         val totalMove = abs(points.last().x - first.x) + abs(points.last().y - first.y)
         val isTap = totalMove < 12
         val duration = max(elapsed, 50L).coerceAtMost(10000L)
+        log("replay panes=${list.map { rs(it) }} srcIdx=$srcIdx isTap=$isTap move=${totalMove.toInt()} duration=${duration}ms")
         val builder = GestureDescription.Builder()
 
-        fun addStroke(mapper: (PointF) -> PointF) {
+        fun addStroke(name: String, mapper: (PointF) -> PointF) {
             val path = Path()
             val p0 = mapper(points[0]); path.moveTo(p0.x, p0.y)
+            val l = mapper(points.last())
             if (!isTap) {
                 val step = max(1, points.size / 40)
                 var k = step
                 while (k < points.size) { val q = mapper(points[k]); path.lineTo(q.x, q.y); k += step }
-                val l = mapper(points.last()); path.lineTo(l.x, l.y)
+                path.lineTo(l.x, l.y)
             }
+            log("  stroke $name start=(${p0.x.toInt()},${p0.y.toInt()}) end=(${l.x.toInt()},${l.y.toInt()})")
             builder.addStroke(GestureDescription.StrokeDescription(path, 0, duration))
         }
 
         if (src == null) {
-            addStroke { it }                        // chạm ngoài mọi vùng: phát nguyên tại chỗ
+            log("  touch ngoài mọi vùng, phát nguyên tại chỗ")
+            addStroke("raw") { it }
         } else {
-            for (dst in list) {
-                addStroke { p ->
+            list.forEachIndexed { i, dst ->
+                addStroke("pane$i") { p ->
                     PointF(
                         dst.left + (p.x - src.left) / src.width() * dst.width(),
                         dst.top + (p.y - src.top) / src.height() * dst.height()
@@ -288,10 +319,18 @@ class SyncService : AccessibilityService() {
         }
 
         setPassThrough(true)
+        val t0 = SystemClock.uptimeMillis()
         val ok = dispatchGesture(builder.build(), object : GestureResultCallback() {
-            override fun onCompleted(g: GestureDescription?) { setPassThrough(false) }
-            override fun onCancelled(g: GestureDescription?) { setPassThrough(false) }
+            override fun onCompleted(g: GestureDescription?) {
+                log("dispatch COMPLETED sau ${SystemClock.uptimeMillis() - t0}ms")
+                setPassThrough(false)
+            }
+            override fun onCancelled(g: GestureDescription?) {
+                log("dispatch CANCELLED sau ${SystemClock.uptimeMillis() - t0}ms")
+                setPassThrough(false)
+            }
         }, null)
+        log("dispatchGesture returned $ok")
         if (!ok) setPassThrough(false)
     }
 }

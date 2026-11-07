@@ -1,6 +1,8 @@
 package com.synctap
 
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.graphics.Color
 import android.os.Bundle
@@ -8,13 +10,17 @@ import android.provider.Settings
 import android.view.Gravity
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 
 class MainActivity : Activity() {
     private lateinit var countText: TextView
+    private lateinit var logText: TextView
 
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
+        Logger.init(this)
         val prefs = getSharedPreferences("cfg", MODE_PRIVATE)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -27,7 +33,7 @@ class MainActivity : Activity() {
                 "4. Bấm nút nổi VÙNG, kéo một khung quanh vùng game của từng cửa sổ (lần lượt 1, 2, ...).\n" +
                 "5. Bấm nút SYNC để bật. Chạm ở cửa sổ nào, các cửa sổ còn lại chạm theo cùng vị trí tương đối.\n" +
                 "Di chuyển hoặc đổi cỡ cửa sổ thì cài lại VÙNG. Tắt SYNC để dùng máy bình thường."
-            textSize = 16f
+            textSize = 15f
             setTextColor(Color.BLACK)
         })
         root.addView(Button(this).apply {
@@ -55,6 +61,38 @@ class MainActivity : Activity() {
         })
         root.addView(row)
         refresh()
-        setContentView(root)
+
+        // ----- Khu vực log -----
+        val logRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        logRow.addView(Button(this).apply {
+            text = "Xem log"
+            setOnClickListener { showLog() }
+        })
+        logRow.addView(Button(this).apply {
+            text = "Sao chép"
+            setOnClickListener {
+                val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+                cm.setPrimaryClip(ClipData.newPlainText("synctap-log", Logger.dump()))
+                Toast.makeText(this@MainActivity, "Đã sao chép log", Toast.LENGTH_SHORT).show()
+            }
+        })
+        logRow.addView(Button(this).apply {
+            text = "Xoá log"
+            setOnClickListener { Logger.clear(); showLog() }
+        })
+        root.addView(logRow)
+        logText = TextView(this).apply {
+            textSize = 10f
+            setTextColor(Color.DKGRAY)
+            setTextIsSelectable(true)
+        }
+        root.addView(logText)
+
+        setContentView(ScrollView(this).apply { addView(root) })
+        showLog()
     }
+
+    override fun onResume() { super.onResume(); showLog() }
+
+    private fun showLog() { logText.text = Logger.dump().takeLast(12000) }
 }
