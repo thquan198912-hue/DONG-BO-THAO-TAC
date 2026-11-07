@@ -12,6 +12,8 @@ import android.graphics.PointF
 import android.graphics.RectF
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.util.DisplayMetrics
 import android.view.Gravity
@@ -46,6 +48,8 @@ class SyncService : AccessibilityService() {
     private var zoneBtn: TextView? = null
     private var zoneParams: WindowManager.LayoutParams? = null
 
+    private val handler = Handler(Looper.getMainLooper())
+    private var injecting = false          // đang phát cử chỉ giả: bỏ qua sự kiện chạm
     private var syncOn = false
     private var calibrating = false
     private var rects = ArrayList<RectF>()      // các vùng cửa sổ đã cài
@@ -236,6 +240,10 @@ class SyncService : AccessibilityService() {
     }
 
     private fun handleSync(e: MotionEvent) {
+        if (injecting) {
+            if (e.action == MotionEvent.ACTION_DOWN) log("bo qua DOWN do cu chi gia (injecting)")
+            return
+        }
         when (e.action) {
             MotionEvent.ACTION_DOWN -> {
                 points.clear(); downTime = e.eventTime; points.add(PointF(e.rawX, e.rawY))
@@ -318,19 +326,23 @@ class SyncService : AccessibilityService() {
             }
         }
 
+        val gesture = builder.build()
+        injecting = true
         setPassThrough(true)
-        val t0 = SystemClock.uptimeMillis()
-        val ok = dispatchGesture(builder.build(), object : GestureResultCallback() {
-            override fun onCompleted(g: GestureDescription?) {
-                log("dispatch COMPLETED sau ${SystemClock.uptimeMillis() - t0}ms")
+        // chờ cờ NOT_TOUCHABLE có hiệu lực rồi mới phát, để cử chỉ giả lọt xuống game
+        handler.postDelayed({
+            val t0 = SystemClock.uptimeMillis()
+            fun finish(name: String) {
+                log("dispatch $name sau ${SystemClock.uptimeMillis() - t0}ms")
                 setPassThrough(false)
+                handler.postDelayed({ injecting = false; log("injecting=false") }, 120)
             }
-            override fun onCancelled(g: GestureDescription?) {
-                log("dispatch CANCELLED sau ${SystemClock.uptimeMillis() - t0}ms")
-                setPassThrough(false)
-            }
-        }, null)
-        log("dispatchGesture returned $ok")
-        if (!ok) setPassThrough(false)
+            val ok = dispatchGesture(gesture, object : GestureResultCallback() {
+                override fun onCompleted(g: GestureDescription?) { finish("COMPLETED") }
+                override fun onCancelled(g: GestureDescription?) { finish("CANCELLED") }
+            }, null)
+            log("dispatchGesture returned $ok")
+            if (!ok) { setPassThrough(false); injecting = false }
+        }, 40)
     }
 }
