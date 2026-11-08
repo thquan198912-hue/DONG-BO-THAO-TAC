@@ -30,9 +30,10 @@ class MainActivity : Activity() {
             text = "SyncTap\n\n1. Mở Cài đặt trợ năng, bật dịch vụ SyncTap.\n" +
                 "2. Mở các game clone ở cửa sổ nổi (hoặc split-screen), sắp xếp vị trí.\n" +
                 "3. Chọn số cửa sổ bên dưới.\n" +
-                "4. Bấm nút nổi VÙNG, kéo một khung quanh vùng game của từng cửa sổ (lần lượt 1, 2, ...).\n" +
+                "4. Bấm nút nổi VÙNG để sửa khung: giữ vào một CẠNH để di chuyển cả vùng, kéo một GÓC để đổi cỡ. " +
+                "Dùng + VÙNG / XOÁ VÙNG để thêm bớt, LƯU VÙNG để lưu, HUỶ SỬA để thoát không lưu.\n" +
                 "5. Bấm nút SYNC để bật. Chạm ở cửa sổ nào, các cửa sổ còn lại chạm theo cùng vị trí tương đối.\n" +
-                "Di chuyển hoặc đổi cỡ cửa sổ thì cài lại VÙNG. Tắt SYNC để dùng máy bình thường."
+                "Tắt SYNC để dùng máy bình thường."
             textSize = 15f
             setTextColor(Color.BLACK)
         })
@@ -61,6 +62,16 @@ class MainActivity : Activity() {
         })
         root.addView(row)
         refresh()
+        val modeBtn = Button(this)
+        fun refreshMode() {
+            modeBtn.text = if (prefs.getBoolean("stream", true)) "Chế độ phát: REALTIME (nhanh)"
+                           else "Chế độ phát: GHI RỒI PHÁT (ổn định)"
+        }
+        modeBtn.setOnClickListener {
+            prefs.edit().putBoolean("stream", !prefs.getBoolean("stream", true)).apply(); refreshMode()
+        }
+        refreshMode()
+        root.addView(modeBtn)
 
         // ----- Khu vực log -----
         val logRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }

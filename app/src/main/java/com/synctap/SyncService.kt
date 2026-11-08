@@ -26,49 +26,115 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
-/** Lớp phủ vẽ khung các vùng cửa sổ game. */
+/** Lớp phủ vẽ khung các vùng; ở chế độ sửa có thêm tay nắm 4 góc và số thứ tự. */
 class RectView(c: Context) : View(c) {
     val rects = ArrayList<RectF>()
-    var cur: RectF? = null
-    private val p = Paint().apply { style = Paint.Style.STROKE; strokeWidth = 4f; color = Color.GREEN }
-    private val pc = Paint().apply { style = Paint.Style.STROKE; strokeWidth = 4f; color = Color.YELLOW }
+    var selected = -1
+    var editing = false
+    private val green = Paint().apply { style = Paint.Style.STROKE; strokeWidth = 4f; color = Color.GREEN }
+    private val yellow = Paint().apply { style = Paint.Style.STROKE; strokeWidth = 8f; color = Color.YELLOW }
+    private val handle = Paint().apply { style = Paint.Style.FILL; color = Color.parseColor("#DDFFFFFF") }
+    private val label = Paint().apply { color = Color.WHITE; textSize = 52f; isFakeBoldText = true; setShadowLayer(4f, 0f, 0f, Color.BLACK) }
+    private val loc = IntArray(2)
+
     override fun onDraw(c: Canvas) {
-        rects.forEach { c.drawRect(it, p) }
-        cur?.let { c.drawRect(it, pc) }
+        getLocationOnScreen(loc)
+        c.translate(-loc[0].toFloat(), -loc[1].toFloat())   // vẽ theo toạ độ màn hình
+        rects.forEachIndexed { i, r ->
+            val sel = editing && i == selected
+            c.drawRect(r, if (sel) yellow else green)
+            if (editing) {
+                val hs = 22f
+                for (k in 0..3) {
+                    val x = if (k == 0 || k == 3) r.left else r.right
+                    val y = if (k < 2) r.top else r.bottom
+                    c.drawRect(x - hs, y - hs, x + hs, y + hs, handle)
+                }
+                c.drawText("${i + 1}", r.left + 36f, r.top + 70f, label)
+            }
+        }
     }
 }
 
 class SyncService : AccessibilityService() {
 
+    companion object {
+        const val FIRST_DELAY = 30L     // chờ cờ NOT_TOUCHABLE có hiệu lực trước nét đầu tiên
+        const val EDGE = 50f            // độ dày vùng bắt cạnh (kéo cả vùng)
+        const val CORNER = 80f          // bán kính bắt góc (đổi cỡ)
+        const val MIN_SIZE = 150f
+    }
+
     private lateinit var wm: WindowManager
+    private val handler = Handler(Looper.getMainLooper())
+
     private var capture: RectView? = null
     private var capParams: WindowManager.LayoutParams? = null
     private var syncBtn: TextView? = null
     private var syncParams: WindowManager.LayoutParams? = null
     private var zoneBtn: TextView? = null
     private var zoneParams: WindowManager.LayoutParams? = null
+    private val editBtns = ArrayList<Pair<TextView, WindowManager.LayoutParams>>()
 
-    private val handler = Handler(Looper.getMainLooper())
-    private var injecting = false          // đang phát cử chỉ giả: bỏ qua sự kiện chạm
     private var syncOn = false
-    private var calibrating = false
-    private var rects = ArrayList<RectF>()      // các vùng cửa sổ đã cài
+    private var editing = false
+    private var rects = ArrayList<RectF>()
+
+    // --- sửa vùng ---
+    private var dragMode = 0        // 0: không, 1: kéo cả vùng, 2: đổi cỡ
+    private var dragIdx = -1
+    private var anchorX = 0f
+    private var anchorY = 0f
+    private var lastX = 0f
+    private var lastY = 0f
+
+    // --- chế độ "ghi rồi phát" ---
+    private var injecting = false
     private val points = ArrayList<PointF>()
     private var downTime = 0L
-    private var sx = 0f
-    private var sy = 0f
+
+    // --- chế độ realtime ---
+    private var curStream = true
+    private var streamActive = false
+    private var sBusy = false
+    private var sFirst = true
+    private var sUp = false
+    private var sMoved = false
+    private var sSeg = 0
+    private var sDownTime = 0L
+    private var sLastSeg = 0L
+    private var sStart = PointF()
+    private var sLast = PointF()
+    private val sPending = ArrayList<PointF>()
+    private var sSrc = RectF()
+    private var sDst: List<RectF> = emptyList()
+    private var sStrokes: Array<GestureDescription.StrokeDescription?> = arrayOfNulls(0)
+
+    private fun log(m: String) = Logger.d("SVC", m)
+    private fun rs(r: RectF) = "[${r.left.toInt()},${r.top.toInt()} - ${r.right.toInt()},${r.bottom.toInt()}]"
+    private fun prefs() = getSharedPreferences("cfg", MODE_PRIVATE)
+    private fun paneCount() = prefs().getInt("panes", 2).coerceIn(1, 8)
+    private fun streamMode() = prefs().getBoolean("stream", true)
+    private fun zoneLabel() = if (rects.isEmpty()) "VÙNG: chưa cài" else "VÙNG ✓ (${rects.size}) - sửa"
+
+    private fun screenSize(): Pair<Float, Float> {
+        val dm = DisplayMetrics()
+        @Suppress("DEPRECATION")
+        wm.defaultDisplay.getRealMetrics(dm)
+        return Pair(dm.widthPixels.toFloat(), dm.heightPixels.toFloat())
+    }
 
     override fun onServiceConnected() {
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
         Logger.init(applicationContext)
-        val dm = DisplayMetrics()
-        @Suppress("DEPRECATION")
-        wm.defaultDisplay.getRealMetrics(dm)
-        log("=== Service connected | ${Build.MODEL} | Android ${Build.VERSION.SDK_INT} | screen ${dm.widthPixels}x${dm.heightPixels} ===")
+        val (w, h) = screenSize()
+        log("=== Service connected | ${Build.MODEL} | Android ${Build.VERSION.SDK_INT} | screen ${w.toInt()}x${h.toInt()} ===")
         loadRects()
-        log("loaded rects=${rects.map { rs(it) }} panes=${paneCount()}")
-        syncBtn = makeButton("SYNC OFF", 20, 300, { toggleSync() }).also { syncParams = it.second }.first
-        zoneBtn = makeButton(zoneLabel(), 20, 420, { toggleCalibrate() }).also { zoneParams = it.second }.first
+        log("loaded rects=${rects.map { rs(it) }} panes=${paneCount()} stream=${streamMode()}")
+        val s = makeButton("SYNC OFF", 20, 300) { toggleSync() }
+        syncBtn = s.first; syncParams = s.second
+        val z = makeButton(zoneLabel(), 20, 420) { if (editing) exitEditor(true) else enterEditor() }
+        zoneBtn = z.first; zoneParams = z.second
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
@@ -76,6 +142,7 @@ class SyncService : AccessibilityService() {
 
     override fun onDestroy() {
         removeCapture()
+        clearEditButtons()
         syncBtn?.let { try { wm.removeView(it) } catch (_: Exception) {} }
         zoneBtn?.let { try { wm.removeView(it) } catch (_: Exception) {} }
         super.onDestroy()
@@ -84,24 +151,18 @@ class SyncService : AccessibilityService() {
     // ---------- Lưu / đọc vùng ----------
     private fun saveRects() {
         val s = rects.joinToString(";") { "${it.left},${it.top},${it.right},${it.bottom}" }
-        getSharedPreferences("cfg", MODE_PRIVATE).edit().putString("rects", s).apply()
+        prefs().edit().putString("rects", s).putInt("panes", rects.size.coerceIn(1, 8)).apply()
     }
 
     private fun loadRects() {
         rects.clear()
-        val s = getSharedPreferences("cfg", MODE_PRIVATE).getString("rects", "") ?: ""
+        val s = prefs().getString("rects", "") ?: ""
         if (s.isBlank()) return
         for (part in s.split(";")) {
             val v = part.split(",").mapNotNull { it.toFloatOrNull() }
             if (v.size == 4) rects.add(RectF(v[0], v[1], v[2], v[3]))
         }
     }
-
-    private fun log(m: String) = Logger.d("SVC", m)
-    private fun rs(r: RectF) = "[${r.left.toInt()},${r.top.toInt()} - ${r.right.toInt()},${r.bottom.toInt()}]"
-
-    private fun paneCount() = getSharedPreferences("cfg", MODE_PRIVATE).getInt("panes", 2).coerceIn(1, 8)
-    private fun zoneLabel() = if (rects.isEmpty()) "VÙNG: chưa cài" else "VÙNG ✓ (${rects.size})"
 
     // ---------- Nút nổi ----------
     private fun makeButton(label: String, x0: Int, y0: Int, onClick: () -> Unit):
@@ -148,49 +209,153 @@ class SyncService : AccessibilityService() {
     private fun bringButtonsToTop() {
         syncBtn?.let { wm.removeView(it); wm.addView(it, syncParams) }
         zoneBtn?.let { wm.removeView(it); wm.addView(it, zoneParams) }
+        editBtns.forEach { wm.removeView(it.first); wm.addView(it.first, it.second) }
+    }
+
+    private fun clearEditButtons() {
+        editBtns.forEach { try { wm.removeView(it.first) } catch (_: Exception) {} }
+        editBtns.clear()
     }
 
     // ---------- Bật/tắt đồng bộ ----------
     private fun toggleSync() {
-        if (calibrating) stopCalibrate(save = false)
+        if (editing) { exitEditor(false); return }       // đang sửa: bấm = huỷ
         syncOn = !syncOn
-        log("toggleSync -> ${if (syncOn) "ON" else "OFF"} (rects=${rects.size})")
+        log("toggleSync -> ${if (syncOn) "ON" else "OFF"} (rects=${rects.size}, stream=${streamMode()})")
         if (syncOn) {
             addCapture()
-            capture?.rects?.apply { clear(); addAll(rects) }
+            capture?.rects?.apply { clear(); rects.forEach { add(RectF(it)) } }
             capture?.invalidate()
             bringButtonsToTop()
             syncBtn?.text = "SYNC ON"; setColor(syncBtn, "#CC1B9E3C")
         } else {
+            endStream("tat sync")
             removeCapture()
             syncBtn?.text = "SYNC OFF"; setColor(syncBtn, "#CC555555")
         }
     }
 
-    // ---------- Cài vùng cửa sổ ----------
-    private fun toggleCalibrate() {
-        if (calibrating) { stopCalibrate(save = false); return }
-        syncOn = false
-        syncBtn?.text = "SYNC OFF"; setColor(syncBtn, "#CC555555")
-        removeCapture()
-        calibrating = true
-        log("calibrate START, need ${paneCount()} rects")
-        addCapture()
-        capture?.rects?.clear()
-        bringButtonsToTop()
-        zoneBtn?.text = "VÙNG 1/${paneCount()}: kéo khung quanh cửa sổ 1"
-        setColor(zoneBtn, "#CCE08A00")
+    // ---------- Sửa vùng ----------
+    private fun defaultRects(): List<RectF> {
+        val (w, h) = screenSize()
+        val n = paneCount()
+        return (0 until n).map { i ->
+            if (h >= w) RectF(40f, i * h / n + 60f, w - 40f, (i + 1) * h / n - 60f)
+            else RectF(i * w / n + 60f, 40f, (i + 1) * w / n - 60f, h - 40f)
+        }
     }
 
-    private fun stopCalibrate(save: Boolean) {
-        log("calibrate STOP save=$save rects=${capture?.rects?.map { rs(it) }}")
-        if (save) {
-            rects = ArrayList(capture?.rects ?: emptyList())
-            saveRects()
-        }
-        calibrating = false
+    private fun enterEditor() {
+        if (syncOn) { syncOn = false; endStream("vao sua") }
         removeCapture()
+        editing = true
+        val work = if (rects.isEmpty()) defaultRects() else rects.map { RectF(it) }
+        log("EDITOR start rects=${work.map { rs(it) }}")
+        addCapture()
+        capture?.let {
+            it.editing = true
+            it.rects.clear(); it.rects.addAll(work)
+            it.selected = if (work.isNotEmpty()) 0 else -1
+            it.invalidate()
+        }
+        bringButtonsToTop()
+        val (_, h) = screenSize()
+        val add = makeButton("+ VÙNG", 20, 540) { addZone() }
+        val del = makeButton("XOÁ VÙNG", 20, 660) { delZone() }
+        editBtns.add(add); editBtns.add(del)
+        zoneBtn?.text = "LƯU VÙNG"; setColor(zoneBtn, "#CCE08A00")
+        syncBtn?.text = "HUỶ SỬA"; setColor(syncBtn, "#CCB00020")
+    }
+
+    private fun exitEditor(save: Boolean) {
+        val v = capture
+        if (save && v != null) {
+            rects = ArrayList(v.rects.map { RectF(it) })
+            saveRects()
+            log("EDITOR saved rects=${rects.map { rs(it) }}")
+        } else log("EDITOR cancelled")
+        editing = false
+        removeCapture()
+        clearEditButtons()
         zoneBtn?.text = zoneLabel(); setColor(zoneBtn, "#CC555555")
+        syncBtn?.text = "SYNC OFF"; setColor(syncBtn, "#CC555555")
+    }
+
+    private fun addZone() {
+        val v = capture ?: return
+        if (v.rects.size >= 8) return
+        val (w, h) = screenSize()
+        v.rects.add(RectF(w / 2 - w * 0.25f, h / 2 - h * 0.12f, w / 2 + w * 0.25f, h / 2 + h * 0.12f))
+        v.selected = v.rects.size - 1
+        v.invalidate()
+        log("EDITOR add zone -> ${v.rects.size}")
+    }
+
+    private fun delZone() {
+        val v = capture ?: return
+        val i = v.selected
+        if (i in v.rects.indices) {
+            v.rects.removeAt(i); v.selected = -1; v.invalidate()
+            log("EDITOR delete zone ${i + 1} -> ${v.rects.size}")
+        }
+    }
+
+    private fun cornerPt(r: RectF, k: Int) =
+        PointF(if (k == 0 || k == 3) r.left else r.right, if (k < 2) r.top else r.bottom)
+
+    private fun onEdge(r: RectF, x: Float, y: Float): Boolean {
+        val inX = x >= r.left - EDGE && x <= r.right + EDGE
+        val inY = y >= r.top - EDGE && y <= r.bottom + EDGE
+        return (inY && (abs(x - r.left) <= EDGE || abs(x - r.right) <= EDGE)) ||
+            (inX && (abs(y - r.top) <= EDGE || abs(y - r.bottom) <= EDGE))
+    }
+
+    private fun handleEdit(v: RectView, e: MotionEvent) {
+        val x = e.rawX; val y = e.rawY
+        val (sw, sh) = screenSize()
+        when (e.action) {
+            MotionEvent.ACTION_DOWN -> {
+                dragMode = 0; dragIdx = -1
+                loop@ for (i in v.rects.indices.reversed()) {
+                    val r = v.rects[i]
+                    for (k in 0..3) {
+                        val c = cornerPt(r, k)
+                        if (abs(x - c.x) < CORNER && abs(y - c.y) < CORNER) {
+                            val o = cornerPt(r, (k + 2) % 4)
+                            anchorX = o.x; anchorY = o.y
+                            dragMode = 2; dragIdx = i; break@loop
+                        }
+                    }
+                    if (onEdge(r, x, y)) { dragMode = 1; dragIdx = i; break@loop }
+                }
+                if (dragIdx >= 0) { v.selected = dragIdx; lastX = x; lastY = y }
+                log("EDIT DOWN (${x.toInt()},${y.toInt()}) zone=${dragIdx + 1} mode=${if (dragMode == 1) "move" else if (dragMode == 2) "resize" else "none"}")
+                v.invalidate()
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (dragIdx !in v.rects.indices) return
+                val r = v.rects[dragIdx]
+                if (dragMode == 1) {
+                    var dx = x - lastX; var dy = y - lastY
+                    val minDx = -r.left; val maxDx = sw - r.right
+                    val minDy = -r.top; val maxDy = sh - r.bottom
+                    if (minDx <= maxDx) dx = dx.coerceIn(minDx, maxDx)
+                    if (minDy <= maxDy) dy = dy.coerceIn(minDy, maxDy)
+                    r.offset(dx, dy)
+                    lastX = x; lastY = y
+                } else if (dragMode == 2) {
+                    val nx = x.coerceIn(0f, sw); val ny = y.coerceIn(0f, sh)
+                    val l = min(anchorX, nx); val rr = max(anchorX, nx)
+                    val t = min(anchorY, ny); val b = max(anchorY, ny)
+                    if (rr - l >= MIN_SIZE && b - t >= MIN_SIZE) r.set(l, t, rr, b)
+                }
+                v.invalidate()
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                if (dragMode != 0 && dragIdx in v.rects.indices) log("EDIT UP zone=${dragIdx + 1} rect=${rs(v.rects[dragIdx])}")
+                dragMode = 0
+            }
+        }
     }
 
     // ---------- Lớp phủ bắt chạm ----------
@@ -205,9 +370,12 @@ class SyncService : AccessibilityService() {
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         )
+        if (Build.VERSION.SDK_INT >= 28) {
+            lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        }
         v.setOnTouchListener { _, e ->
             if (e.pointerCount > 1) return@setOnTouchListener true
-            if (calibrating) handleCalibrate(v, e) else handleSync(e)
+            if (editing) handleEdit(v, e) else handleSync(e)
             true
         }
         capture = v; capParams = lp
@@ -219,52 +387,9 @@ class SyncService : AccessibilityService() {
         capture = null; capParams = null
     }
 
-    private fun handleCalibrate(v: RectView, e: MotionEvent) {
-        when (e.action) {
-            MotionEvent.ACTION_DOWN -> { sx = e.rawX; sy = e.rawY }
-            MotionEvent.ACTION_MOVE -> {
-                v.cur = RectF(min(sx, e.rawX), min(sy, e.rawY), max(sx, e.rawX), max(sy, e.rawY))
-                v.invalidate()
-            }
-            MotionEvent.ACTION_UP -> {
-                val r = RectF(min(sx, e.rawX), min(sy, e.rawY), max(sx, e.rawX), max(sy, e.rawY))
-                v.cur = null
-                if (r.width() > 100 && r.height() > 100) v.rects.add(r)
-                log("calibrate rect ${rs(r)} accepted=${r.width() > 100 && r.height() > 100}")
-                v.invalidate()
-                val n = paneCount()
-                if (v.rects.size >= n) stopCalibrate(save = true)
-                else zoneBtn?.text = "VÙNG ${v.rects.size + 1}/$n: kéo khung quanh cửa sổ ${v.rects.size + 1}"
-            }
-        }
-    }
-
-    private fun handleSync(e: MotionEvent) {
-        if (injecting) {
-            if (e.action == MotionEvent.ACTION_DOWN) log("bo qua DOWN do cu chi gia (injecting)")
-            return
-        }
-        when (e.action) {
-            MotionEvent.ACTION_DOWN -> {
-                points.clear(); downTime = e.eventTime; points.add(PointF(e.rawX, e.rawY))
-                val loc = IntArray(2)
-                capture?.getLocationOnScreen(loc)
-                log("DOWN raw=(${e.rawX.toInt()},${e.rawY.toInt()}) local=(${e.x.toInt()},${e.y.toInt()}) overlayOrigin=(${loc[0]},${loc[1]})")
-            }
-            MotionEvent.ACTION_MOVE -> points.add(PointF(e.rawX, e.rawY))
-            MotionEvent.ACTION_UP -> {
-                points.add(PointF(e.rawX, e.rawY))
-                val el = e.eventTime - downTime
-                log("UP raw=(${e.rawX.toInt()},${e.rawY.toInt()}) points=${points.size} held=${el}ms")
-                replay(el)
-            }
-        }
-    }
-
     private fun setPassThrough(on: Boolean) {
         val v = capture ?: return
         val lp = capParams ?: return
-        log("passThrough=$on")
         lp.flags = if (on) lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
                    else lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
         try { wm.updateViewLayout(v, lp) } catch (_: Exception) {}
@@ -273,19 +398,133 @@ class SyncService : AccessibilityService() {
     /** Danh sách vùng: dùng vùng đã cài, nếu chưa có thì chia đều màn hình. */
     private fun panes(): List<RectF> {
         if (rects.isNotEmpty()) return rects
-        val dm = DisplayMetrics()
-        @Suppress("DEPRECATION")
-        wm.defaultDisplay.getRealMetrics(dm)
-        val w = dm.widthPixels.toFloat(); val h = dm.heightPixels.toFloat()
-        val n = paneCount()
-        return (0 until n).map { i ->
-            if (h >= w) RectF(0f, i * h / n, w, (i + 1) * h / n)
-            else RectF(i * w / n, 0f, (i + 1) * w / n, h)
+        return defaultRects()
+    }
+
+    private fun mapPt(p: PointF, src: RectF, dst: RectF) = PointF(
+        dst.left + (p.x - src.left) / src.width() * dst.width(),
+        dst.top + (p.y - src.top) / src.height() * dst.height()
+    )
+
+    // ---------- Xử lý chạm khi SYNC ON ----------
+    private fun handleSync(e: MotionEvent) {
+        when (e.action) {
+            MotionEvent.ACTION_DOWN -> {
+                if (injecting || streamActive) { log("bo qua DOWN (dang phat)"); return }
+                curStream = streamMode()
+                log("DOWN raw=(${e.rawX.toInt()},${e.rawY.toInt()}) dev=${e.deviceId} src=${e.source} mode=${if (curStream) "realtime" else "ghi-roi-phat"}")
+                if (curStream) startStream(e.rawX, e.rawY)
+                else { points.clear(); downTime = e.eventTime; points.add(PointF(e.rawX, e.rawY)) }
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (curStream) {
+                    if (streamActive && !sUp) { sPending.add(PointF(e.rawX, e.rawY)); pump() }
+                } else if (!injecting) points.add(PointF(e.rawX, e.rawY))
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                if (curStream) {
+                    if (streamActive && !sUp) {
+                        sPending.add(PointF(e.rawX, e.rawY)); sUp = true
+                        log("UP raw=(${e.rawX.toInt()},${e.rawY.toInt()}) held=${SystemClock.uptimeMillis() - sDownTime}ms")
+                        pump()
+                    }
+                } else if (!injecting) {
+                    points.add(PointF(e.rawX, e.rawY))
+                    val el = e.eventTime - downTime
+                    log("UP raw=(${e.rawX.toInt()},${e.rawY.toInt()}) points=${points.size} held=${el}ms")
+                    replayRecorded(el)
+                }
+            }
         }
     }
 
-    // ---------- Phát lại lên mọi cửa sổ ----------
-    private fun replay(elapsed: Long) {
+    // =====================================================================
+    // CHẾ ĐỘ REALTIME: phát từng đoạn nhỏ ngay khi ngón tay đang di chuyển
+    // =====================================================================
+    private fun startStream(x: Float, y: Float) {
+        val list = panes()
+        val idx = list.indexOfFirst { it.contains(x, y) }
+        if (idx < 0) {
+            val (w, h) = screenSize()
+            sSrc = RectF(0f, 0f, w, h); sDst = listOf(sSrc)
+        } else { sSrc = list[idx]; sDst = list }
+        sStart = PointF(x, y); sLast = PointF(x, y)
+        sPending.clear()
+        sStrokes = arrayOfNulls(sDst.size)
+        sFirst = true; sUp = false; sMoved = false; sSeg = 0
+        sDownTime = SystemClock.uptimeMillis(); sLastSeg = sDownTime
+        streamActive = true
+        sBusy = true
+        log("stream START srcIdx=$idx panes=${sDst.map { rs(it) }}")
+        setPassThrough(true)
+        handler.postDelayed({ sBusy = false; pump() }, FIRST_DELAY)
+    }
+
+    private fun pump() {
+        if (!streamActive || sBusy) return
+        val now = SystemClock.uptimeMillis()
+        val pts = ArrayList<PointF>()
+        val finalSeg: Boolean
+        val dur: Long
+        if (sFirst) {
+            val tap = sUp && sPending.all { abs(it.x - sStart.x) + abs(it.y - sStart.y) < 12f }
+            if (tap) { finalSeg = true; dur = max(now - sDownTime, 60L).coerceAtMost(3000L); sPending.clear() }
+            else { finalSeg = false; dur = 20L }
+            log("first seg sau ${now - sDownTime}ms tap=$tap")
+        } else {
+            if (sPending.isEmpty() && !sUp) return
+            pts.addAll(sPending); sPending.clear()
+            finalSeg = sUp
+            var d = (now - sLastSeg).coerceIn(16L, 100L)
+            if (finalSeg && !sMoved && pts.size <= 1) d = max(d, 40L)
+            dur = d
+            if (pts.any { abs(it.x - sStart.x) + abs(it.y - sStart.y) > 12f }) sMoved = true
+        }
+
+        val builder = GestureDescription.Builder()
+        for ((i, dst) in sDst.withIndex()) {
+            val path = Path()
+            val a = mapPt(sLast, sSrc, dst)
+            path.moveTo(a.x, a.y)
+            for (q in pts) { val m = mapPt(q, sSrc, dst); path.lineTo(m.x, m.y) }
+            val prev = sStrokes[i]
+            val st = if (prev == null) GestureDescription.StrokeDescription(path, 0, dur, !finalSeg)
+                     else prev.continueStroke(path, 0, dur, !finalSeg)
+            sStrokes[i] = st
+            builder.addStroke(st)
+        }
+        if (pts.isNotEmpty()) sLast = pts.last()
+        sFirst = false
+        sBusy = true
+        sLastSeg = now
+        sSeg++
+        val n = sSeg
+        val ok = try {
+            dispatchGesture(builder.build(), object : GestureResultCallback() {
+                override fun onCompleted(g: GestureDescription?) {
+                    sBusy = false
+                    if (finalSeg) endStream("xong ($n doan)") else pump()
+                }
+                override fun onCancelled(g: GestureDescription?) { endStream("CANCELLED o doan $n") }
+            }, null)
+        } catch (ex: Exception) { log("dispatch loi: ${ex.message}"); false }
+        if (!ok) endStream("dispatchGesture=false o doan $n")
+    }
+
+    private fun endStream(reason: String) {
+        if (!streamActive) return
+        streamActive = false
+        sBusy = false
+        sStrokes = arrayOfNulls(0)
+        sPending.clear()
+        setPassThrough(false)
+        log("stream END: $reason")
+    }
+
+    // =====================================================================
+    // CHẾ ĐỘ "GHI RỒI PHÁT" (dự phòng, chậm hơn nhưng ổn định)
+    // =====================================================================
+    private fun replayRecorded(elapsed: Long) {
         if (points.isEmpty()) return
         val list = panes()
         val first = points.first()
@@ -295,53 +534,38 @@ class SyncService : AccessibilityService() {
         val totalMove = abs(points.last().x - first.x) + abs(points.last().y - first.y)
         val isTap = totalMove < 12
         val duration = max(elapsed, 50L).coerceAtMost(10000L)
-        log("replay panes=${list.map { rs(it) }} srcIdx=$srcIdx isTap=$isTap move=${totalMove.toInt()} duration=${duration}ms")
+        log("replay srcIdx=$srcIdx isTap=$isTap move=${totalMove.toInt()} duration=${duration}ms")
         val builder = GestureDescription.Builder()
 
-        fun addStroke(name: String, mapper: (PointF) -> PointF) {
+        fun addStroke(mapper: (PointF) -> PointF) {
             val path = Path()
             val p0 = mapper(points[0]); path.moveTo(p0.x, p0.y)
-            val l = mapper(points.last())
             if (!isTap) {
                 val step = max(1, points.size / 40)
                 var k = step
                 while (k < points.size) { val q = mapper(points[k]); path.lineTo(q.x, q.y); k += step }
-                path.lineTo(l.x, l.y)
+                val l = mapper(points.last()); path.lineTo(l.x, l.y)
             }
-            log("  stroke $name start=(${p0.x.toInt()},${p0.y.toInt()}) end=(${l.x.toInt()},${l.y.toInt()})")
             builder.addStroke(GestureDescription.StrokeDescription(path, 0, duration))
         }
 
-        if (src == null) {
-            log("  touch ngoài mọi vùng, phát nguyên tại chỗ")
-            addStroke("raw") { it }
-        } else {
-            list.forEachIndexed { i, dst ->
-                addStroke("pane$i") { p ->
-                    PointF(
-                        dst.left + (p.x - src.left) / src.width() * dst.width(),
-                        dst.top + (p.y - src.top) / src.height() * dst.height()
-                    )
-                }
-            }
-        }
+        if (src == null) addStroke { it }
+        else list.forEach { dst -> addStroke { p -> mapPt(p, src, dst) } }
 
         val gesture = builder.build()
         injecting = true
         setPassThrough(true)
-        // chờ cờ NOT_TOUCHABLE có hiệu lực rồi mới phát, để cử chỉ giả lọt xuống game
         handler.postDelayed({
             val t0 = SystemClock.uptimeMillis()
             fun finish(name: String) {
                 log("dispatch $name sau ${SystemClock.uptimeMillis() - t0}ms")
                 setPassThrough(false)
-                handler.postDelayed({ injecting = false; log("injecting=false") }, 120)
+                handler.postDelayed({ injecting = false }, 120)
             }
             val ok = dispatchGesture(gesture, object : GestureResultCallback() {
                 override fun onCompleted(g: GestureDescription?) { finish("COMPLETED") }
                 override fun onCancelled(g: GestureDescription?) { finish("CANCELLED") }
             }, null)
-            log("dispatchGesture returned $ok")
             if (!ok) { setPassThrough(false); injecting = false }
         }, 40)
     }

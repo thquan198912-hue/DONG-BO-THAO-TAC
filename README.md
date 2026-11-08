@@ -18,14 +18,18 @@
    - Android 13+: nếu bị chặn, vào Cài đặt → Ứng dụng → SyncTap → ⋮ → **Cho phép cài đặt bị hạn chế**.
 2. Mở các game clone (cửa sổ nổi, freeform hoặc split-screen) và sắp xếp vị trí.
 3. Trong SyncTap chọn **Số cửa sổ** khớp với số game đang mở.
-4. Bấm nút nổi **VÙNG**, rồi kéo một khung quanh vùng game của từng cửa sổ (lần lượt 1, 2, ...). Nếu bỏ qua bước này, app chia đều màn hình.
-5. Bấm nút nổi **SYNC OFF** để bật (thành **SYNC ON**, hiện khung xanh quanh các vùng). Kéo nút để dời chỗ. Bấm lại để tắt.
-6. Di chuyển hoặc đổi cỡ cửa sổ thì cài lại VÙNG.
+4. Bấm nút nổi **VÙNG** để sửa khung từng cửa sổ:
+   - Giữ vào một **cạnh** của khung rồi kéo: di chuyển cả vùng.
+   - Kéo một **góc** (ô vuông trắng): đổi cỡ vùng.
+   - **+ VÙNG** / **XOÁ VÙNG**: thêm, xoá vùng đang chọn (viền vàng).
+   - **LƯU VÙNG**: lưu và thoát. **HUỶ SỬA** (nút SYNC khi đang sửa): thoát không lưu.
+5. Bấm nút nổi **SYNC OFF** để bật (thành **SYNC ON**, hiện khung xanh quanh các vùng). Tắt SYNC mới sửa được vùng.
+6. Trong app có nút đổi **chế độ phát**: REALTIME (phát từng đoạn ngay khi ngón tay đang di chuyển, độ trễ thấp) hoặc GHI RỒI PHÁT (ổn định hơn nhưng trễ bằng thời gian vuốt).
 
 ## Giới hạn hiện tại
-- Cử chỉ được ghi xong mới phát lại, nên vuốt bị trễ một nhịp.
+- Chế độ REALTIME cần Android 8 trở lên và có thể không hoạt động trên một số máy; khi đó chuyển sang GHI RỒI PHÁT.
 - Chỉ hỗ trợ một ngón (chưa có zoom hai ngón).
-- Vùng cửa sổ cài thủ công; cửa sổ nổi di chuyển hoặc đổi cỡ thì phải cài lại.
+- Vùng cửa sổ chỉnh thủ công; cửa sổ nổi di chuyển hoặc đổi cỡ thì phải chỉnh lại vùng.
 - Nhiều game phát hiện thao tác tự động và có thể khoá tài khoản. Tự cân nhắc điều khoản của game.
 
 ## Cấu trúc
