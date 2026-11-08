@@ -1,7 +1,9 @@
 package com.synctap
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityServiceInfo
 import android.accessibilityservice.GestureDescription
+import android.accessibilityservice.TouchInteractionController
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
@@ -16,6 +18,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.DisplayMetrics
+import android.view.Display
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -88,6 +91,12 @@ class SyncService : AccessibilityService() {
     private var lastX = 0f
     private var lastY = 0f
 
+    // --- chế độ HỆ THỐNG (TouchInteractionController) ---
+    private var systemMode = false
+    private var tic: TouchInteractionController? = null
+    private var ticCb: TouchInteractionController.Callback? = null
+    private var delegated = false
+
     // --- chế độ "ghi rồi phát" ---
     private var injecting = false
     private val points = ArrayList<PointF>()
@@ -114,7 +123,8 @@ class SyncService : AccessibilityService() {
     private fun rs(r: RectF) = "[${r.left.toInt()},${r.top.toInt()} - ${r.right.toInt()},${r.bottom.toInt()}]"
     private fun prefs() = getSharedPreferences("cfg", MODE_PRIVATE)
     private fun paneCount() = prefs().getInt("panes", 2).coerceIn(1, 8)
-    private fun streamMode() = prefs().getBoolean("stream", true)
+    private fun mode() = prefs().getInt("mode", 1)          // 1: ghi rồi phát, 2: hệ thống
+    private fun streamMode() = mode() == 0 || systemMode
     private fun zoneLabel() = if (rects.isEmpty()) "VÙNG: chưa cài" else "VÙNG ✓ (${rects.size}) - sửa"
 
     private fun screenSize(): Pair<Float, Float> {
@@ -141,6 +151,7 @@ class SyncService : AccessibilityService() {
     override fun onInterrupt() {}
 
     override fun onDestroy() {
+        disableSystemTouch()
         removeCapture()
         clearEditButtons()
         syncBtn?.let { try { wm.removeView(it) } catch (_: Exception) {} }
@@ -223,13 +234,15 @@ class SyncService : AccessibilityService() {
         syncOn = !syncOn
         log("toggleSync -> ${if (syncOn) "ON" else "OFF"} (rects=${rects.size}, stream=${streamMode()})")
         if (syncOn) {
-            addCapture()
+            systemMode = if (mode() == 2) enableSystemTouch() else false
+            addCapture(touchable = !systemMode)
             capture?.rects?.apply { clear(); rects.forEach { add(RectF(it)) } }
             capture?.invalidate()
             bringButtonsToTop()
             syncBtn?.text = "SYNC ON"; setColor(syncBtn, "#CC1B9E3C")
         } else {
             endStream("tat sync")
+            disableSystemTouch()
             removeCapture()
             syncBtn?.text = "SYNC OFF"; setColor(syncBtn, "#CC555555")
         }
@@ -246,7 +259,7 @@ class SyncService : AccessibilityService() {
     }
 
     private fun enterEditor() {
-        if (syncOn) { syncOn = false; endStream("vao sua") }
+        if (syncOn) { syncOn = false; endStream("vao sua"); disableSystemTouch() }
         removeCapture()
         editing = true
         val work = if (rects.isEmpty()) defaultRects() else rects.map { RectF(it) }
@@ -359,7 +372,7 @@ class SyncService : AccessibilityService() {
     }
 
     // ---------- Lớp phủ bắt chạm ----------
-    private fun addCapture() {
+    private fun addCapture(touchable: Boolean = true) {
         val v = RectView(this).apply { setBackgroundColor(Color.parseColor("#14FF0000")) }
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -370,6 +383,7 @@ class SyncService : AccessibilityService() {
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         )
+        if (!touchable) lp.flags = lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
         if (Build.VERSION.SDK_INT >= 28) {
             lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
         }
@@ -388,6 +402,7 @@ class SyncService : AccessibilityService() {
     }
 
     private fun setPassThrough(on: Boolean) {
+        if (systemMode) return                      // lớp phủ đã luôn không nhận chạm
         val v = capture ?: return
         val lp = capParams ?: return
         lp.flags = if (on) lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
@@ -405,6 +420,70 @@ class SyncService : AccessibilityService() {
         dst.left + (p.x - src.left) / src.width() * dst.width(),
         dst.top + (p.y - src.top) / src.height() * dst.height()
     )
+
+    // =====================================================================
+    // CHẾ ĐỘ HỆ THỐNG: hệ thống đưa cảm ứng thẳng cho service (không qua cửa sổ nào)
+    // nên cử chỉ giả không còn huỷ ngón tay thật.
+    // =====================================================================
+    private fun enableSystemTouch(): Boolean {
+        if (Build.VERSION.SDK_INT < 30) { log("TIC can Android 11+, dung che do ghi-roi-phat"); return false }
+        return try {
+            val info = serviceInfo ?: return false
+            info.flags = info.flags or AccessibilityServiceInfo.FLAG_REQUEST_TOUCH_EXPLORATION_MODE
+            serviceInfo = info
+            val c = getTouchInteractionController(Display.DEFAULT_DISPLAY)
+            val cb = object : TouchInteractionController.Callback {
+                override fun onMotionEvent(event: MotionEvent) { onSystemMotion(event) }
+                override fun onStateChanged(state: Int) { log("TIC state=$state") }
+            }
+            c.registerCallback(mainExecutor, cb)
+            tic = c; ticCb = cb
+            log("TIC enabled maxPointers=${c.maxPointerCount} state=${c.state}")
+            true
+        } catch (ex: Throwable) {
+            log("TIC loi: ${ex.javaClass.simpleName}: ${ex.message}")
+            false
+        }
+    }
+
+    private fun disableSystemTouch() {
+        if (!systemMode && tic == null) return
+        try {
+            ticCb?.let { tic?.unregisterCallback(it) }
+            val info = serviceInfo
+            if (info != null) {
+                info.flags = info.flags and AccessibilityServiceInfo.FLAG_REQUEST_TOUCH_EXPLORATION_MODE.inv()
+                serviceInfo = info
+            }
+        } catch (ex: Throwable) { log("TIC tat loi: ${ex.message}") }
+        tic = null; ticCb = null; systemMode = false; delegated = false
+        log("TIC disabled")
+    }
+
+    private fun hitsOurUi(x: Float, y: Float): Boolean {
+        val m = 30
+        val loc = IntArray(2)
+        for (b in listOfNotNull(syncBtn, zoneBtn)) {
+            b.getLocationOnScreen(loc)
+            if (x >= loc[0] - m && x <= loc[0] + b.width + m && y >= loc[1] - m && y <= loc[1] + b.height + m) return true
+        }
+        val (w, h) = screenSize()
+        return x < 30 || x > w - 30 || y > h - 70 || y < 50     // mép màn hình: để hệ thống xử lý cử chỉ
+    }
+
+    private fun onSystemMotion(e: MotionEvent) {
+        if (delegated) {
+            if (e.action == MotionEvent.ACTION_UP || e.action == MotionEvent.ACTION_CANCEL) delegated = false
+            return
+        }
+        if (e.action == MotionEvent.ACTION_DOWN && !streamActive && hitsOurUi(e.rawX, e.rawY)) {
+            log("TIC delegate DOWN (${e.rawX.toInt()},${e.rawY.toInt()}) -> de he thong/nut xu ly")
+            delegated = true
+            tic?.requestDelegating()
+            return
+        }
+        handleSync(e)
+    }
 
     // ---------- Xử lý chạm khi SYNC ON ----------
     private fun handleSync(e: MotionEvent) {
@@ -457,7 +536,7 @@ class SyncService : AccessibilityService() {
         sBusy = true
         log("stream START srcIdx=$idx panes=${sDst.map { rs(it) }}")
         setPassThrough(true)
-        handler.postDelayed({ sBusy = false; pump() }, FIRST_DELAY)
+        handler.postDelayed({ sBusy = false; pump() }, if (systemMode) 0L else FIRST_DELAY)
     }
 
     private fun pump() {

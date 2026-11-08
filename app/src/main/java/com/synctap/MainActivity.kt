@@ -64,11 +64,11 @@ class MainActivity : Activity() {
         refresh()
         val modeBtn = Button(this)
         fun refreshMode() {
-            modeBtn.text = if (prefs.getBoolean("stream", true)) "Chế độ phát: REALTIME (nhanh)"
-                           else "Chế độ phát: GHI RỒI PHÁT (ổn định)"
+            modeBtn.text = if (prefs.getInt("mode", 1) == 2) "Chế độ: HỆ THỐNG (thử nghiệm, Android 11+)"
+                           else "Chế độ: GHI RỒI PHÁT (ổn định, trễ)"
         }
         modeBtn.setOnClickListener {
-            prefs.edit().putBoolean("stream", !prefs.getBoolean("stream", true)).apply(); refreshMode()
+            prefs.edit().putInt("mode", if (prefs.getInt("mode", 1) == 2) 1 else 2).apply(); refreshMode()
         }
         refreshMode()
         root.addView(modeBtn)

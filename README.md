@@ -24,10 +24,12 @@
    - **+ VÙNG** / **XOÁ VÙNG**: thêm, xoá vùng đang chọn (viền vàng).
    - **LƯU VÙNG**: lưu và thoát. **HUỶ SỬA** (nút SYNC khi đang sửa): thoát không lưu.
 5. Bấm nút nổi **SYNC OFF** để bật (thành **SYNC ON**, hiện khung xanh quanh các vùng). Tắt SYNC mới sửa được vùng.
-6. Trong app có nút đổi **chế độ phát**: REALTIME (phát từng đoạn ngay khi ngón tay đang di chuyển, độ trễ thấp) hoặc GHI RỒI PHÁT (ổn định hơn nhưng trễ bằng thời gian vuốt).
+6. Trong app có nút đổi **chế độ**:
+   - **GHI RỒI PHÁT**: ổn định, nhưng cửa sổ kia chỉ chạm sau khi bạn nhấc tay.
+   - **HỆ THỐNG** (thử nghiệm, Android 11+): dùng TouchInteractionController để hệ thống đưa cảm ứng thẳng cho service, hy vọng điều khiển được mà không cần nhấc tay. Chạm vào nút nổi hoặc mép màn hình vẫn hoạt động bình thường.
 
 ## Giới hạn hiện tại
-- Chế độ REALTIME cần Android 8 trở lên và có thể không hoạt động trên một số máy; khi đó chuyển sang GHI RỒI PHÁT.
+- `dispatchGesture` huỷ mọi cử chỉ đang diễn ra, kể cả ngón tay thật, nên không thể vừa chạm thật vừa phát cử chỉ giả qua lớp phủ; chế độ HỆ THỐNG là cách vượt qua giới hạn đó.
 - Chỉ hỗ trợ một ngón (chưa có zoom hai ngón).
 - Vùng cửa sổ chỉnh thủ công; cửa sổ nổi di chuyển hoặc đổi cỡ thì phải chỉnh lại vùng.
 - Nhiều game phát hiện thao tác tự động và có thể khoá tài khoản. Tự cân nhắc điều khoản của game.
